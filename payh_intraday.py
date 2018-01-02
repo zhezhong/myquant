@@ -10,6 +10,7 @@ import numpy as np
 from scipy.stats import linregress
 import matplotlib.pyplot as plt
 #from function_tool import *
+pd.set_option('precision', 5)
 
 class Mystrategy(StrategyBase):
     def __init__(self, *args, **kwargs):
@@ -23,8 +24,10 @@ class Mystrategy(StrategyBase):
         self.short = False
         self.unit_volume = 3000
         self.start_time = '2017-12-20 08:05:00'
-        self.boll_threshold=0.008
-        self.sma_threshold=0.001
+        self.boll_threshold=0.01
+        # 千分之一的扰动很正常。至少得千分之1.6
+        self.sma_threshold=0.0016
+        self.profit_threhold=0.02
 
     # def caculate sensititive AMA
     def KAMA(price, n=10, pow1=2, pow2=30):
@@ -33,12 +36,11 @@ class Mystrategy(StrategyBase):
 
         absDiffx = abs(price - price.shift(1))
 
+
         ER_num = abs(price - price.shift(n))
         ER_den = pandas.stats.moments.rolling_sum(absDiffx, n)
         ER = ER_num / ER_den
-
         sc = (ER * (2.0 / (pow1 + 1) - 2.0 / (pow2 + 1.0)) + 2 / (pow2 + 1.0)) ** 2.0
-
         answer = np.zeros(sc.size)
         N = len(answer)
         first_value = True
@@ -53,28 +55,59 @@ class Mystrategy(StrategyBase):
                 else:
                     answer[i] = answer[i - 1] + sc[i] * (price[i] - answer[i - 1])
         return answer
+    def stop_profit(self):
+        if self.long:
+            if self.price > self.long_buy_price*(1+self.profit_threhold):
+                self.close_long(self.symbol[:4], self.symbol[5:], price=self.price, volume=self.unit_volume)
+                print('close long profit positions%s %s volume:%d at price:%f long buy price %f' % (
+                self.symbol[:4], self.symbol[5:], self.unit_volume, self.price, self.long_buy_price))
+                self.long = False
+                self.long_sell_price = self.price
+        if self.short:
+            if self.price <self.short_buy_price*(1-self.profit_threhold):
+                self.open_long(self.symbol[:4], self.symbol[5:], price=self.price, volume=self.unit_volume)
+                print('close short profit  positions%s %s volume:%d at price:%f short buy price %f' % (
+                    self.symbol[:4], self.symbol[5:], self.unit_volume,self.price, self.short_buy_price))
+                self.short = False
+                self.short_sell_price = self.price
+
+    # 2017年 8月 10 明明那一拨行情有5%的利润，你特么 2% 就止盈了，还是不是接下来3%的利润蒸发了。
+    #  这是第一笔亏损。
     def on_tick(self, tick):
-        self.price = tick.last_price
+        if (tick.last_price != 0):
+            self.price = tick.last_price
+        #self.stop_profit()
     def on_bar(self, bar):
         if self.init:
             self.open_long(self.symbol[:4], self.symbol[5:], price=0, volume=5000)
+            self.long_buy_price = self.price
             postion = self.get_position(self.symbol[:4], self.symbol[5:], 1)
             #print('ddd', postion.volume)
             self.init=False
-
+        #print(bar.strendtime)
         etime = bar.strendtime[:10]+' '+bar.strendtime[11:19]
         n_bar = self.get_last_n_bars(self.symbol,300,100,end_time=etime)
+        #print(type(n_bar))
+        # 我知道什么是reverse 本身了。
+        n_bar.reverse()
+        #print(type(n_bar))
         data = pd.DataFrame()
         data['data']  = [key.close for key in n_bar]
         data['close'] = [key.close for key in n_bar]
         data['low']   = [key.low for key in n_bar]
         data['high']  = [key.high for key in n_bar]
+        data['strendtime']=[key.strendtime for key in n_bar]
+        #print(len(data['close']))
+        if (len(data['high']))== 0:
+
+            return 0
+        #print(data)
         # 用分钟级别数据，获取五分钟 数据的 5单位均线
         atr = tbs.ATR(np.array(data['high']),np.array(data['low']),np.array(data['close']),20)
 
         sma_5 = tbs.EMA(np.array(data['close']),5)
         # 10 单位五分钟均线
-        sma_10 = tbs.EMA(np.array(data['close']), 10)
+        sma_10 = tbs.EMA(np.array(data['close']), 20)
         # 20单位 五分钟均线
         sma_20 = tbs.EMA(np.array(data['close']),20)
         plt.plot(sma_20)
@@ -113,7 +146,8 @@ class Mystrategy(StrategyBase):
             if(self.short):
                 self.short = False
                 self.open_long(self.symbol[:4],self.symbol[5:],price=self.price, volume= self.unit_volume)
-                print('close short  positions%s %s volume:%d at price:%f sma5:%f sma10:%f' %(self.symbol[:4], self.symbol[5:], self.unit_volume,self.price, sma_5[-1], sma_10[-1]))
+                self.short_sell_price = self.price
+                print(etime,'close short  positions%s %s volume:%d at price:%f sma5:%f sma10:%f' %(self.symbol[:4], self.symbol[5:], self.unit_volume,self.price, sma_5[-1], sma_10[-1]))
 
             # 开多仓需要追加一些条件。
             # 1. rg[0]>-0.01 强势下跌 不做多。
@@ -136,14 +170,13 @@ class Mystrategy(StrategyBase):
                 pass
             else:
                 print('---------------', etime)
-                print('sma20 slope is:%d and bollwidth is:%f,thre is%f' % (
-                rg[0], boll_width[-1], self.boll_threshold * self.price))
+                print('sma20 slope is:%d and bollwidth is:%f,thre is%f' %(rg[0], boll_width[-1], self.boll_threshold * self.price))
 
                 # 开多仓
                 self.long = True
                 print('open long positions%s %s volume:%d price:%f sma5:%f sma10:%f' %(self.symbol[:4], self.symbol[5:], self.unit_volume,self.price,sma_5[-1], sma_10[-1]))
                 self.open_long(self.symbol[:4], self.symbol[5:], price=self.price, volume=self.unit_volume)
-
+                self.long_buy_price = self.price
             #强势上涨过程中不做空。
 
         elif sma_5[-1] < sma_10[-1] and self.short == False and rg[0]<0.005:
@@ -152,8 +185,9 @@ class Mystrategy(StrategyBase):
 
             if self.long:
                 self.long = False
+                self.long_sell_price = self.price
                 self.close_long(self.symbol[:4],self.symbol[5:],price=self.price, volume= self.unit_volume)
-                print('close long positions%s %s volume:%d price: %f ,sma5:%f sma10:%f' % (self.symbol[:4], self.symbol[5:], self.unit_volume,self.price, sma_5[-1], sma_10[-1]))
+                print(etime,'close long positions%s %s volume:%d price: %f ,sma5:%f sma10:%f' % (self.symbol[:4], self.symbol[5:], self.unit_volume,self.price, sma_5[-1], sma_10[-1]))
             #if len(orders)<5:
             #    self.last_order_judge = True
             #else:
@@ -172,8 +206,9 @@ class Mystrategy(StrategyBase):
 
                 # 再开空仓；
                 # 上升行情中，rg[0] = self.
-                new_order = self.close_long(self.symbol[:4], self.symbol[5:], price=0, volume=self.unit_volume)
+                new_order = self.close_long(self.symbol[:4], self.symbol[5:], price=self.price, volume=self.unit_volume)
                 self.short = True
+                self.short_buy_price = self.price
                 #print(new_order)
                 print('open short positions%s %s volume:%d at price: %f ,sma5:%f sma10:%f' %(self.symbol[:4],self.symbol[5:],self.unit_volume,self.price,sma_5[-1],sma_10[-1]))
 
@@ -196,8 +231,8 @@ if __name__ == '__main__':
         td_addr='127.0.0.1:8001'
     )
     myStrategy.backtest_config(
-        start_time='2017-12-01 08:05:00',
-        end_time='2017-12-29 15:05:00',
+        start_time='2017-05-05 08:05:00',
+        end_time='2017-12-20 15:05:00',
         initial_cash=100000,
         transaction_ratio=0.8,
         commission_ratio=0.0001,
